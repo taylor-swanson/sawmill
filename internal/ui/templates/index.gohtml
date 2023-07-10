@@ -5,5 +5,22 @@
 {{define "main"}}
     <h1>Welcome to Sawmill</h1>
     <p>A tool for examining Elastic Agent diagnostic bundles.</p>
+
+    <div id="viewer">
+        <h2>Upload Support Bundle</h2>
+        <form id="form" hx-encoding="multipart/form-data" hx-post="/upload" hx-target="#viewer">
+            <input type="file" name="file" accept="application/zip">
+            <button type="submit">Upload</button>
+            <br/>
+            <progress id="progress" value="0" max="100"></progress>
+        </form>
+        <script>
+            htmx.on('#form', 'htmx:xhr:progress', function(evt) {
+                htmx.find('#progress').setAttribute('value', evt.detail.loaded/evt.detail.total * 100)
+            });
+        </script>
+    </div>
+
+    <h2></h2>
 {{end}}
 

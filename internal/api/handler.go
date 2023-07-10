@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"html/template"
+	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"go.uber.org/multierr"
 
+	"github.com/taylor-swanson/sawmill/internal/bundle"
 	"github.com/taylor-swanson/sawmill/internal/logger"
 	"github.com/taylor-swanson/sawmill/internal/ui"
 )
@@ -44,7 +47,10 @@ type Handler struct {
 	// Embedding chi.Mux.
 	*chi.Mux
 
-	indexTmpl *template.Template
+	indexTmpl         *template.Template
+	bundleDetailsFrag *template.Template
+
+	maxUploadSize int64
 }
 
 // middlewareCtxProps injects a CtxProps instance into the request's context.
@@ -118,12 +124,85 @@ func (h *Handler) handleGetRoot(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusTeapot)
 }
 
+func (h *Handler) handlePostUpload(w http.ResponseWriter, r *http.Request) {
+	type BundleDetails struct {
+		Filename  string
+		BuildTime string
+		Commit    string
+		Snapshot  bool
+		Version   string
+		ID        string
+	}
+
+	if err := r.ParseMultipartForm(h.maxUploadSize); err != nil {
+		// TODO: Add nicer error handling.
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		// TODO: Add nicer error handling.
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// TODO: Save or cache bundle. For now, just quickly read it and return some basic info.
+	tmpFile, err := os.CreateTemp("", "sawmill-*.zip")
+	if err != nil {
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	logger.Debug().Str("path", tmpFile.Name()).Str("bundle_filename", header.Filename).Msg("Writing bundle to temporary file")
+	defer func() {
+		if err := os.Remove(tmpFile.Name()); err != nil {
+			logger.Warn().Err(err).Str("path", tmpFile.Name()).Msg("Failed to remove bundle file")
+		}
+	}()
+	if _, err = io.Copy(tmpFile, file); err != nil {
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	_ = tmpFile.Close()
+
+	viewer, err := bundle.NewViewer(tmpFile.Name())
+	if err != nil {
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	bundleDetails := BundleDetails{
+		Filename:  header.Filename,
+		BuildTime: viewer.Info().BuildTime.Format(time.RFC3339),
+		Commit:    viewer.Info().Commit,
+		Snapshot:  viewer.Info().Snapshot,
+		Version:   viewer.Info().Version,
+		ID:        viewer.Info().ID,
+	}
+
+	if err = h.bundleDetailsFrag.Execute(w, &bundleDetails); err != nil {
+		// TODO: Add nicer error handling.
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
 func (h *Handler) loadTemplates() error {
 	var err error
 
 	h.indexTmpl, err = template.ParseFS(ui.FS, "templates/layouts/*.gohtml", "templates/index.gohtml")
 	if err != nil {
-		return fmt.Errorf("unable to parse index template: %w", err)
+		return fmt.Errorf("unable to parse template: %w", err)
+	}
+	h.bundleDetailsFrag, err = template.ParseFS(ui.FS, "templates/fragments/bundle_details.gohtml")
+	if err != nil {
+		return fmt.Errorf("unable to parse template: %w", err)
 	}
 
 	return nil
@@ -131,7 +210,8 @@ func (h *Handler) loadTemplates() error {
 
 func NewHandler() (http.Handler, error) {
 	h := &Handler{
-		Mux: chi.NewRouter(),
+		Mux:           chi.NewRouter(),
+		maxUploadSize: 100 * 1024 * 1024, // 100 MB
 	}
 	h.Use(
 		h.middlewareRecovery,
@@ -146,6 +226,7 @@ func NewHandler() (http.Handler, error) {
 
 	// Routes
 	h.Get("/", h.handleGetRoot)
+	h.Post("/upload", h.handlePostUpload)
 
 	return h, nil
 }

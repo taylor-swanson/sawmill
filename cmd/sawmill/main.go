@@ -5,6 +5,9 @@ import (
 
 	"github.com/taylor-swanson/sawmill/cmd/sawmill/cli"
 	"github.com/taylor-swanson/sawmill/internal/logger"
+
+	_ "github.com/taylor-swanson/sawmill/internal/bundle/v1"
+	_ "github.com/taylor-swanson/sawmill/internal/bundle/v2"
 )
 
 func main() {

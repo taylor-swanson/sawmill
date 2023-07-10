@@ -12,7 +12,7 @@ import (
 const (
 	Name = "v1"
 
-	versionFile = "meta/elastic-agent-versionyaml"
+	versionFile = "meta/elastic-agent-version.yaml"
 )
 
 type viewer struct {
