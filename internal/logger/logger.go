@@ -51,9 +51,9 @@ func NewLogger(opts Options) *Logger {
 	})
 	if opts.Pretty {
 		cw := zerolog.ConsoleWriter{Out: w, TimeFormat: time.RFC3339Nano}
-		l.zl = zerolog.New(cw).With().Timestamp().Logger()
+		l.zl = zerolog.New(cw).With().Timestamp().Logger().Level(opts.Level)
 	} else {
-		l.zl = zerolog.New(w).With().Timestamp().Logger()
+		l.zl = zerolog.New(w).With().Timestamp().Logger().Level(opts.Level)
 	}
 
 	return &l

@@ -5,6 +5,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/taylor-swanson/sawmill/internal/api"
 	"github.com/taylor-swanson/sawmill/internal/logger"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,7 +19,7 @@ func newCmdRun() *cobra.Command {
 		RunE:  doRun,
 	}
 
-	cmd.Flags().StringP("listen", "l", ":8080", "http server listen address")
+	cmd.Flags().StringP("listen", "l", ":8082", "http server listen address")
 	cmd.Flags().BoolP("https", "s", false, "use https")
 	cmd.Flags().StringP("cert", "c", "cert.pem", "path to server certificate file")
 	cmd.Flags().StringP("key", "k", "key.pem", "path to server key file")
@@ -32,7 +33,10 @@ func doRun(cmd *cobra.Command, _ []string) error {
 	key, _ := cmd.Flags().GetString("key")
 	https, _ := cmd.Flags().GetBool("https")
 
-	handler := api.NewHandler()
+	handler, err := api.NewHandler()
+	if err != nil {
+		return err
+	}
 
 	srv := &http.Server{
 		Addr:    addr,
@@ -48,12 +52,20 @@ func doRun(cmd *cobra.Command, _ []string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 		defer cancel()
 
-		_ = srv.Shutdown(ctx)
+		if err := srv.Shutdown(ctx); err != nil {
+			logger.Error().Err(err).Msg("Server shutdown error")
+		}
 		close(done)
 	}()
 
-	logger.Info().Str("listen", srv.Addr).Msg("Running sawmill...")
-	var err error
+	scheme := "http"
+	if https {
+		scheme = "https"
+	}
+	_, port, _ := net.SplitHostPort(srv.Addr)
+
+	logger.Debug().Str("listen", srv.Addr).Msg("Started listener")
+	logger.Info().Msgf("Access the Sawmill UI at %s://localhost:%s", scheme, port)
 	if https {
 		err = srv.ListenAndServeTLS(cert, key)
 	} else {
@@ -61,11 +73,10 @@ func doRun(cmd *cobra.Command, _ []string) error {
 	}
 	if err != nil && err != http.ErrServerClosed {
 		logger.Error().Err(err).Msg("Server error")
-		close(done)
 	}
 
 	<-done
-	logger.Info().Msg("Sawmill shut down")
+	logger.Debug().Msg("Sawmill shut down")
 
 	return nil
 }
