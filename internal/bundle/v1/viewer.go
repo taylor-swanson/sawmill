@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"bundleviewer/internal/bundle"
+	"github.com/taylor-swanson/sawmill/internal/bundle"
 )
 
 const (
