@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"html/template"
 	"net/http"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"go.uber.org/multierr"
 
 	"github.com/taylor-swanson/sawmill/internal/logger"
+	"github.com/taylor-swanson/sawmill/internal/ui"
 )
 
 // contextKey defines keys for context values.
@@ -41,6 +43,8 @@ func PropsFromContext(ctx context.Context) *CtxProps {
 type Handler struct {
 	// Embedding chi.Mux.
 	*chi.Mux
+
+	indexTmpl *template.Template
 }
 
 // middlewareCtxProps injects a CtxProps instance into the request's context.
@@ -105,7 +109,27 @@ func (h *Handler) middlewareLogger(next http.Handler) http.Handler {
 	})
 }
 
-func NewHandler() http.Handler {
+func (h *Handler) handleGetRoot(w http.ResponseWriter, r *http.Request) {
+	if err := h.indexTmpl.ExecuteTemplate(w, "base", nil); err != nil {
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusTeapot)
+}
+
+func (h *Handler) loadTemplates() error {
+	var err error
+
+	h.indexTmpl, err = template.ParseFS(ui.FS, "templates/layouts/*.gohtml", "templates/index.gohtml")
+	if err != nil {
+		return fmt.Errorf("unable to parse index template: %w", err)
+	}
+
+	return nil
+}
+
+func NewHandler() (http.Handler, error) {
 	h := &Handler{
 		Mux: chi.NewRouter(),
 	}
@@ -116,5 +140,12 @@ func NewHandler() http.Handler {
 		middleware.StripSlashes,
 	)
 
-	return h
+	if err := h.loadTemplates(); err != nil {
+		return nil, err
+	}
+
+	// Routes
+	h.Get("/", h.handleGetRoot)
+
+	return h, nil
 }
