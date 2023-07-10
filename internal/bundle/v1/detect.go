@@ -10,7 +10,7 @@ func Detect(filename string) bool {
 		return false
 	}
 	defer zr.Close()
-	f, err := zr.Open(versionFile)
+	f, err := openVersionFile(zr)
 	if err != nil {
 		return false
 	}

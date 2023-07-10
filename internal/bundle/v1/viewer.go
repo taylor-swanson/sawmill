@@ -2,7 +2,9 @@ package v1
 
 import (
 	"archive/zip"
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"time"
 
@@ -11,9 +13,12 @@ import (
 
 const (
 	Name = "v1"
-
-	versionFile = "meta/elastic-agent-version.yaml"
 )
+
+var versionFilepaths = []string{
+	"meta/elastic-agent-version.yaml",
+	"meta/elastic-agent-versionyaml",
+}
 
 type viewer struct {
 	zr       *zip.ReadCloser
@@ -45,7 +50,7 @@ func New(filename string) (bundle.Viewer, error) {
 	if b.zr, err = zip.OpenReader(filename); err != nil {
 		return nil, fmt.Errorf("unable to create new bundle: %w", err)
 	}
-	infoReader, err := b.zr.Open(versionFile)
+	infoReader, err := openVersionFile(b.zr)
 	if err != nil {
 		_ = b.zr.Close()
 		return nil, fmt.Errorf("unable to read bundle info: %w", err)
@@ -59,6 +64,20 @@ func New(filename string) (bundle.Viewer, error) {
 	}
 
 	return &b, nil
+}
+
+func openVersionFile(reader *zip.ReadCloser) (fs.File, error) {
+	var file fs.File
+
+	for _, v := range versionFilepaths {
+		file, _ = reader.Open(v)
+	}
+
+	if file == nil {
+		return nil, errors.New("unable to find version file")
+	}
+
+	return file, nil
 }
 
 func init() {
