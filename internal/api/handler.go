@@ -1,20 +1,30 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/taylor-swanson/sawmill/internal/collections"
 	"html/template"
 	"io"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/google/uuid"
 	"go.uber.org/multierr"
 
 	"github.com/taylor-swanson/sawmill/internal/bundle"
+	"github.com/taylor-swanson/sawmill/internal/component/config"
+	"github.com/taylor-swanson/sawmill/internal/component/logs"
+	"github.com/taylor-swanson/sawmill/internal/hash"
 	"github.com/taylor-swanson/sawmill/internal/logger"
+	"github.com/taylor-swanson/sawmill/internal/session"
 	"github.com/taylor-swanson/sawmill/internal/ui"
 )
 
@@ -47,10 +57,13 @@ type Handler struct {
 	// Embedding chi.Mux.
 	*chi.Mux
 
-	indexTmpl         *template.Template
-	bundleDetailsFrag *template.Template
+	indexTmpl *template.Template
+	fragments *template.Template
 
 	maxUploadSize int64
+
+	sessions   map[string]*session.Session
+	sessionsMu sync.RWMutex
 }
 
 // middlewareCtxProps injects a CtxProps instance into the request's context.
@@ -117,6 +130,7 @@ func (h *Handler) middlewareLogger(next http.Handler) http.Handler {
 
 func (h *Handler) handleGetRoot(w http.ResponseWriter, r *http.Request) {
 	if err := h.indexTmpl.ExecuteTemplate(w, "base", nil); err != nil {
+		// TODO: Add nicer error handling.
 		PropsFromContext(r.Context()).AppendError(err)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
@@ -125,13 +139,13 @@ func (h *Handler) handleGetRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) handlePostUpload(w http.ResponseWriter, r *http.Request) {
-	type BundleDetails struct {
-		Filename  string
-		BuildTime string
-		Commit    string
-		Snapshot  bool
-		Version   string
-		ID        string
+	type SessionState struct {
+		Hash             string
+		Filename         string
+		OriginalFilename string
+		Info             bundle.Info
+		Configs          []config.Entry
+		Logs             []logs.Entry
 	}
 
 	if err := r.ParseMultipartForm(h.maxUploadSize); err != nil {
@@ -149,7 +163,42 @@ func (h *Handler) handlePostUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Save or cache bundle. For now, just quickly read it and return some basic info.
+	fileHash, err := hash.SHA256FromReader(file)
+	if err != nil {
+		// TODO: Add nicer error handling.
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	h.sessionsMu.RLock()
+	if s, ok := h.sessions[fileHash]; ok {
+		logger.Debug().Str("hash", s.Hash).Str("filename", s.Filename).Msg("Using existing session")
+		h.sessionsMu.RUnlock()
+
+		state := SessionState{
+			Hash:             s.Hash,
+			Filename:         s.Filename,
+			OriginalFilename: header.Filename,
+			Info:             s.Viewer.Info(),
+			Configs:          s.Viewer.GetConfigs(),
+			Logs:             s.Viewer.GetLogs(),
+		}
+
+		if err = h.fragments.ExecuteTemplate(w, "bundleDetail", &state); err != nil {
+			// TODO: Add nicer error handling.
+			PropsFromContext(r.Context()).AppendError(err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		return
+	}
+	h.sessionsMu.RUnlock()
+
+	// Reset reader back to beginning of file.
+	_, _ = file.Seek(0, 0)
+
 	tmpFile, err := os.CreateTemp("", "sawmill-*.zip")
 	if err != nil {
 		PropsFromContext(r.Context()).AppendError(err)
@@ -157,14 +206,15 @@ func (h *Handler) handlePostUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	logger.Debug().Str("path", tmpFile.Name()).Str("bundle_filename", header.Filename).Msg("Writing bundle to temporary file")
-	defer func() {
-		if err := os.Remove(tmpFile.Name()); err != nil {
-			logger.Warn().Err(err).Str("path", tmpFile.Name()).Msg("Failed to remove bundle file")
-		}
-	}()
+	//defer func() {
+	//	if err := os.Remove(tmpFile.Name()); err != nil {
+	//		logger.Warn().Err(err).Str("path", tmpFile.Name()).Msg("Failed to remove bundle file")
+	//	}
+	//}()
 	if _, err = io.Copy(tmpFile, file); err != nil {
 		PropsFromContext(r.Context()).AppendError(err)
 		w.WriteHeader(http.StatusInternalServerError)
+		_ = os.Remove(tmpFile.Name())
 		return
 	}
 	_ = tmpFile.Close()
@@ -173,19 +223,154 @@ func (h *Handler) handlePostUpload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		PropsFromContext(r.Context()).AppendError(err)
 		w.WriteHeader(http.StatusInternalServerError)
+		_ = os.Remove(tmpFile.Name())
 		return
 	}
 
-	bundleDetails := BundleDetails{
-		Filename:  header.Filename,
-		BuildTime: viewer.Info().BuildTime.Format(time.RFC3339),
-		Commit:    viewer.Info().Commit,
-		Snapshot:  viewer.Info().Snapshot,
-		Version:   viewer.Info().Version,
-		ID:        viewer.Info().ID,
+	// Make a new session.
+	s := session.Session{
+		ID:               uuid.New(),
+		Filename:         tmpFile.Name(),
+		OriginalFilename: header.Filename,
+		Hash:             fileHash,
+		Viewer:           viewer,
+		LogContexts:      map[string]*logs.Context{},
+	}
+	logger.Debug().Str("hash", s.Hash).Str("filename", s.Filename).Msg("Creating new session")
+
+	h.sessionsMu.Lock()
+	h.sessions[s.Hash] = &s
+	h.sessionsMu.Unlock()
+
+	state := SessionState{
+		Hash:             s.Hash,
+		Filename:         s.Filename,
+		OriginalFilename: s.OriginalFilename,
+		Info:             s.Viewer.Info(),
+		Configs:          s.Viewer.GetConfigs(),
+		Logs:             s.Viewer.GetLogs(),
 	}
 
-	if err = h.bundleDetailsFrag.Execute(w, &bundleDetails); err != nil {
+	if err = h.fragments.ExecuteTemplate(w, "bundleDetail", &state); err != nil {
+		// TODO: Add nicer error handling.
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+func (h *Handler) handleGetInspectConfig(w http.ResponseWriter, r *http.Request) {
+	type ConfigInfo struct {
+		Filename string
+		Content  string
+	}
+
+	fileHash := chi.URLParam(r, "hash")
+	filename := r.FormValue("filename")
+
+	logger.Debug().Str("hash", fileHash).Str("filename", filename).Msg("Requesting a config file")
+
+	h.sessionsMu.RLock()
+	s, ok := h.sessions[fileHash]
+	h.sessionsMu.RUnlock()
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	file, err := s.Viewer.OpenFile(filename)
+	if err != nil {
+		// TODO: Add nicer error handling.
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	buf := bytes.NewBuffer(nil)
+	if _, err = io.Copy(buf, file); err != nil {
+		// TODO: Add nicer error handling.
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	configInfo := ConfigInfo{
+		Filename: filename,
+		Content:  buf.String(),
+	}
+
+	if err = h.fragments.ExecuteTemplate(w, "configDetail", &configInfo); err != nil {
+		// TODO: Add nicer error handling.
+		PropsFromContext(r.Context()).AppendError(err)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+}
+
+func (h *Handler) handleGetInspectLog(w http.ResponseWriter, r *http.Request) {
+	type LogData struct {
+		Fields  []string
+		Entries []collections.Fields
+	}
+	type LogInfo struct {
+		Filename  string
+		LogData   LogData
+		Type      logs.Type
+		Component logs.Component
+	}
+
+	fileHash := chi.URLParam(r, "hash")
+	filename := r.FormValue("filename")
+
+	logger.Debug().Str("hash", fileHash).Str("filename", filename).Msg("Requesting a log file")
+
+	h.sessionsMu.RLock()
+	s, ok := h.sessions[fileHash]
+	h.sessionsMu.RUnlock()
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	logCtx, ok := s.LogContexts[fileHash]
+	if !ok {
+		file, err := s.Viewer.OpenFile(filename)
+		if err != nil {
+			// TODO: Add nicer error handling.
+			PropsFromContext(r.Context()).AppendError(err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		p, err := logs.NewParser("ndjson")
+		if err != nil {
+			// TODO: Add nicer error handling.
+			PropsFromContext(r.Context()).AppendError(err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		logCtx, err = p.Parse(file)
+		if err != nil {
+			// TODO: Add nicer error handling.
+			PropsFromContext(r.Context()).AppendError(err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		s.LogContexts[filename] = logCtx
+	}
+
+	configInfo := LogInfo{
+		Filename: filename,
+		LogData: LogData{
+			Fields:  logCtx.Fields(),
+			Entries: logCtx.ViewAll(),
+		},
+		Type:      logs.GetType(filename),
+		Component: logs.GetComponent(filename),
+	}
+
+	if err := h.fragments.ExecuteTemplate(w, "logDetail", &configInfo); err != nil {
 		// TODO: Add nicer error handling.
 		PropsFromContext(r.Context()).AppendError(err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -196,11 +381,89 @@ func (h *Handler) handlePostUpload(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) loadTemplates() error {
 	var err error
 
-	h.indexTmpl, err = template.ParseFS(ui.FS, "templates/layouts/*.gohtml", "templates/index.gohtml")
+	tmplFuncs := template.FuncMap{
+		"configTypeToStr":   func(t config.Type) string { return t.String() },
+		"logTypeToStr":      func(t logs.Type) string { return t.String() },
+		"logComponentToStr": func(c logs.Component) string { return c.String() },
+		"marshalJSON": func(v any) template.JS {
+			data, mErr := json.Marshal(v)
+			if mErr != nil {
+				panic(mErr)
+			}
+			return template.JS(data)
+		},
+		"makeTableData": func(entries []collections.Fields, fields []string) template.JS {
+			tableData := make([]map[string]any, 0, len(entries))
+
+			i := 1
+			for _, entry := range entries {
+				entryData := make(map[string]any, len(fields))
+
+				entryData["id"] = i
+				for _, field := range fields {
+					if field == "id" {
+						continue
+					}
+					if v, ok := entry.Get(field); ok {
+						entryData[strings.ReplaceAll(field, ".", "_")] = fmt.Sprintf("%v", v)
+					} else {
+						entryData[strings.ReplaceAll(field, ".", "_")] = ""
+					}
+				}
+				tableData = append(tableData, entryData)
+				i++
+			}
+
+			data, mErr := json.Marshal(tableData)
+			if mErr != nil {
+				panic(mErr)
+			}
+			return template.JS(data)
+		},
+		"makeTableColumns": func(fields []string) template.JS {
+			type tableColumnData struct {
+				Title              string         `json:"title"`
+				Field              string         `json:"field"`
+				HeaderFilter       string         `json:"headerFilter,omitempty"`
+				HeaderFilterParams map[string]any `json:"headerFilterParams,omitempty"`
+			}
+
+			tableColumns := make([]tableColumnData, 0, len(fields))
+			for _, field := range fields {
+				if field == "id" {
+					continue
+				}
+				tcd := tableColumnData{
+					Title: field,
+					Field: strings.ReplaceAll(field, ".", "_"),
+				}
+				if field == "log.level" {
+					tcd.HeaderFilter = "list"
+					tcd.HeaderFilterParams = map[string]any{
+						"valuesLookup": true,
+						"clearable":    true,
+					}
+				}
+				if field == "" {
+
+				}
+
+				tableColumns = append(tableColumns, tcd)
+			}
+
+			data, mErr := json.Marshal(tableColumns)
+			if mErr != nil {
+				panic(mErr)
+			}
+			return template.JS(data)
+		},
+	}
+
+	h.indexTmpl, err = template.New("base").Funcs(tmplFuncs).ParseFS(ui.FS, "templates/layouts/*.gohtml", "templates/index.gohtml")
 	if err != nil {
 		return fmt.Errorf("unable to parse template: %w", err)
 	}
-	h.bundleDetailsFrag, err = template.ParseFS(ui.FS, "templates/fragments/bundle_details.gohtml")
+	h.fragments, err = template.New("bundleDetails").Funcs(tmplFuncs).ParseFS(ui.FS, "templates/fragments/*.gohtml")
 	if err != nil {
 		return fmt.Errorf("unable to parse template: %w", err)
 	}
@@ -208,10 +471,25 @@ func (h *Handler) loadTemplates() error {
 	return nil
 }
 
-func NewHandler() (http.Handler, error) {
+func (h *Handler) Close() {
+	h.sessionsMu.Lock()
+	defer h.sessionsMu.Unlock()
+
+	for _, v := range h.sessions {
+		_ = v.Viewer.Close()
+		if err := os.Remove(v.Filename); err != nil {
+			logger.Error().Err(err).Str("filename", v.Filename).Msg("Failed to remove file")
+		} else {
+			logger.Debug().Str("filename", v.Filename).Msg("Removed file")
+		}
+	}
+}
+
+func NewHandler() (*Handler, error) {
 	h := &Handler{
 		Mux:           chi.NewRouter(),
 		maxUploadSize: 100 * 1024 * 1024, // 100 MB
+		sessions:      map[string]*session.Session{},
 	}
 	h.Use(
 		h.middlewareRecovery,
@@ -227,6 +505,8 @@ func NewHandler() (http.Handler, error) {
 	// Routes
 	h.Get("/", h.handleGetRoot)
 	h.Post("/upload", h.handlePostUpload)
+	h.Get("/inspect/config/{hash}", h.handleGetInspectConfig)
+	h.Get("/inspect/log/{hash}", h.handleGetInspectLog)
 
 	return h, nil
 }
