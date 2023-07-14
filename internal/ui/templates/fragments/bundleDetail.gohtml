@@ -1,0 +1,29 @@
+{{define "bundleDetail"}}
+<div id="viewer">
+    <h2>Diagnostic Bundle</h2>
+    <h3>Overview</h3>
+    <ul>
+        <li><b>Filename: </b>{{.OriginalFilename}}</li>
+        <li><b>ID: </b>{{.Info.ID}}</li>
+        <li><b>Version: </b>{{.Info.Version}}</li>
+        <li><b>Snapshot: </b>{{.Info.Snapshot}}</li>
+        <li><b>Commit: </b>{{.Info.Commit}}</li>
+        <li><b>BuildTime: </b>{{.Info.BuildTime}}</li>
+    </ul>
+    <h3>Configs</h3>
+    <ul>
+        {{range .Configs}}
+            <li><a href="#" hx-get="/inspect/config/{{$.Hash}}?filename={{.Filename}}" hx-target="#detail-view">{{.Filename}}</a> ({{ configTypeToStr .Type}})</li>
+        {{end}}
+    </ul>
+    <h3>Logs</h3>
+    <ul>
+        {{range .Logs}}
+            <li><a href="#" hx-get="/inspect/log/{{$.Hash}}?filename={{.Filename}}" hx-target="#detail-view">{{.Filename}}</a></li>
+        {{end}}
+    </ul>
+    <div id="detail-view"></div>
+    <hr/>
+    <a href="/">Start Over</a>
+</div>
+{{end}}

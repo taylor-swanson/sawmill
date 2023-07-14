@@ -2,14 +2,16 @@ package cli
 
 import (
 	"context"
-	"github.com/spf13/cobra"
-	"github.com/taylor-swanson/sawmill/internal/api"
-	"github.com/taylor-swanson/sawmill/internal/logger"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"time"
+
+	"github.com/spf13/cobra"
+	
+	"github.com/taylor-swanson/sawmill/internal/api"
+	"github.com/taylor-swanson/sawmill/internal/logger"
 )
 
 func newCmdRun() *cobra.Command {
@@ -76,6 +78,9 @@ func doRun(cmd *cobra.Command, _ []string) error {
 	}
 
 	<-done
+
+	handler.Close()
+
 	logger.Debug().Msg("Sawmill shut down")
 
 	return nil

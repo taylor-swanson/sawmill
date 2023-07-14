@@ -1,0 +1,23 @@
+{{define "logDetail"}}
+    <div id="detail-view">
+        <h3>Log Detail</h3>
+        <ui>
+            <li><b>Filename:</b> {{.Filename}}</li>
+            <li><b>Type:</b> {{ logTypeToStr .Type}}</li>
+            <li><b>Component:</b> {{ logComponentToStr .Component}}</li>
+        </ui>
+        <div id="log-table"></div>
+    </div>
+    <script>
+        var tableData = {{makeTableData .LogData.Entries .LogData.Fields}}
+        var columns = {{makeTableColumns .LogData.Fields}}
+
+        var table = new Tabulator("#log-table", {
+            height: 205, // set height of table (in CSS or here), this enables the Virtual DOM and improves render speed dramatically (can be any valid css height value)
+            data: tableData, //assign data to table
+            layout: "fitColumns", //fit columns to width of table (optional)
+            movableColumns: true,
+            columns: columns,
+        });
+    </script>
+{{end}}

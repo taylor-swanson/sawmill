@@ -8,6 +8,8 @@ import (
 
 	_ "github.com/taylor-swanson/sawmill/internal/bundle/v1"
 	_ "github.com/taylor-swanson/sawmill/internal/bundle/v2"
+	_ "github.com/taylor-swanson/sawmill/internal/component/logs/ndjson"
+	_ "github.com/taylor-swanson/sawmill/internal/component/logs/text"
 )
 
 func main() {
